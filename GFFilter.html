@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GFF Filter & Visualization</title>
+<style>
+body{font-family:sans-serif;background:#f9fafb;margin:0;}
+header{background:white;border-bottom:1px solid #ccc;padding:8px 20px;display:flex;justify-content:space-between;align-items:center;}
+h1{margin:0;font-size:18px;}
+.tabs{display:flex;border-bottom:1px solid #ccc;}
+.tab{flex:1;text-align:center;padding:8px;cursor:pointer;background:#eee;}
+.tab.active{background:white;font-weight:bold;border-bottom:2px solid #000;}
+section{display:none;padding:10px 16px;}
+section.active{display:block;}
+.container{display:flex;gap:16px;}
+aside{width:250px;background:white;border:1px solid #ddd;border-radius:10px;padding:10px;}
+main{flex:1;}
+input,select{width:100%;padding:6px;margin:4px 0;border:1px solid #ccc;border-radius:6px;}
+button{padding:6px 10px;margin-top:6px;cursor:pointer;border:1px solid #bbb;background:white;border-radius:6px;}
+button:hover{background:#eee;}
+table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;}
+th,td{border:1px solid #eee;padding:6px;text-align:left;font-size:13px;}
+th{background:#f3f4f6;cursor:pointer;}
+.summary{font-size:12px;color:#555;}
+canvas{background:white;border:1px solid #ccc;border-radius:8px;margin-top:10px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>GFF Filter & Visualization</h1>
+  <div><input type="file" id="fileInput" accept=".gff,.txt,.tsv"></div>
+</header>
+
+<div class="tabs">
+  <div class="tab active" data-tab="query">Filtering</div>
+  <div class="tab" data-tab="viz">Visualization</div>
+</div>
+
+<section id="query" class="active">
+  <div class="container">
+    <aside>
+      <h3>筛选条件</h3>
+      <label>Subfamily</label><select id="subSelect"><option value="">全部</option></select>
+      <label>Family</label><select id="famSelect"><option value="">全部</option></select>
+      <label>染色体</label><select id="chrSelect"><option value="">全部</option></select>
+      <label>链方向</label>
+      <select id="strandSelect">
+        <option value="">全部</option><option value="+">+</option><option value="-">-</option><option value="C">C</option>
+      </select>
+      <label>长度范围</label>
+      <div style="display:flex;gap:4px;">
+        <input type="number" id="lenMin" placeholder="min">
+        <input type="number" id="lenMax" placeholder="max">
+      </div>
+      <button id="filterBtn">筛选</button>
+      <button id="resetBtn">重置</button>
+      <div class="summary" id="summary"></div>
+    </aside>
+
+    <main>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>seqid</th>
+            <th>subfamily</th>
+            <th>family</th>
+            <th>start</th>
+            <th>end</th>
+            <th id="sortLength">length ⬍⬆</th>
+            <th>strand</th>
+            <th id="sortScore">score ⬍⬆</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="pageInfo" class="summary"></div>
+    </main>
+  </div>
+</section>
+
+<section id="viz">
+  <h3>不同染色体上 Subfamily 数量分布</h3>
+  <select id="chrForViz"><option value="">请选择染色体</option></select>
+  <canvas id="barCanvas" width="1400" height="800"></canvas>
+</section>
+
+<script>
+let allRows = [];
+let currentRows = [];
+let sortStates = { length: 1, score: 1 };
+
+// ---------- 解析文件 ----------
+function parseGFF(text){
+  const rows=[];
+  const lines=text.split(/\r?\n/);
+  for(let line of lines){
+    if(!line||line.startsWith("#")) continue;
+    const p=line.split(/\t/);
+    if(p.length<9) continue;
+    const [seqid,src,sub,start,end,score,strand,phase,fam]=p;
+    const s=+start,e=+end;
+    rows.push({seqid,subfamily:sub,family:fam,start:s,end:e,length:e-s+1,strand,score:+score});
+  }
+  return rows;
+}
+
+// ---------- 填充下拉框 ----------
+function fillSelect(id,values){
+  const sel=document.getElementById(id);
+  sel.innerHTML="<option value=''>全部</option>"+[...values].map(v=>`<option>${v}</option>`).join("");
+}
+
+// ---------- 渲染表格 ----------
+function renderTable(rows){
+  const tbody=document.querySelector("#resultTable tbody");
+  tbody.innerHTML=rows.map(r=>
+    `<tr><td>${r.seqid}</td><td>${r.subfamily}</td><td>${r.family}</td>
+    <td>${r.start}</td><td>${r.end}</td><td>${r.length}</td><td>${r.strand}</td><td>${r.score}</td></tr>`
+  ).join("");
+  document.getElementById("pageInfo").textContent=`共 ${rows.length} 条`;
+}
+
+// ---------- 筛选 ----------
+function renderFiltered(){
+  const sub=document.getElementById("subSelect").value;
+  const fam=document.getElementById("famSelect").value;
+  const chr=document.getElementById("chrSelect").value;
+  const strand=document.getElementById("strandSelect").value;
+  const lenMin=+document.getElementById("lenMin").value||0;
+  const lenMax=+document.getElementById("lenMax").value||Infinity;
+  const f=allRows.filter(r=>
+    (!sub||r.subfamily===sub)&&(!fam||r.family===fam)&&(!chr||r.seqid===chr)&&(!strand||r.strand===strand)&&
+    (r.length>=lenMin&&r.length<=lenMax)
+  );
+  currentRows=f;
+  renderTable(currentRows);
+  document.getElementById("summary").textContent=`筛选结果 ${f.length} 条`;
+}
+
+// ---------- 文件读取 ----------
+document.getElementById("fileInput").addEventListener("change",e=>{
+  const f=e.target.files[0];
+  if(!f)return;
+  const reader=new FileReader();
+  reader.onload=()=>{
+    allRows=parseGFF(reader.result);
+    currentRows=allRows.slice();
+    const chrs=new Set(allRows.map(r=>r.seqid));
+    const subs=new Set(allRows.map(r=>r.subfamily));
+    const fams=new Set(allRows.map(r=>r.family));
+    fillSelect("chrSelect",chrs);
+    fillSelect("chrForViz",chrs);
+    fillSelect("subSelect",subs);
+    fillSelect("famSelect",fams);
+    renderTable(allRows);
+    document.getElementById("summary").textContent=`已载入 ${allRows.length} 条`;
+  };
+  reader.readAsText(f);
+});
+
+// ---------- 按钮 ----------
+document.getElementById("filterBtn").onclick=()=>renderFiltered();
+document.getElementById("resetBtn").onclick=()=>{
+  document.querySelectorAll("select,input[type=number]").forEach(el=>el.value="");
+  currentRows=allRows.slice();
+  renderTable(allRows);
+};
+
+// ---------- tab 切换 ----------
+document.querySelectorAll(".tab").forEach(tab=>{
+  tab.onclick=()=>{
+    document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+    document.querySelectorAll("section").forEach(s=>s.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById(tab.dataset.tab).classList.add("active");
+  };
+});
+
+// ---------- 排序 ----------
+document.getElementById("sortLength").addEventListener("click",()=>{
+  sortStates.length*=-1;
+  currentRows.sort((a,b)=>(a.length-b.length)*sortStates.length);
+  renderTable(currentRows);
+});
+document.getElementById("sortScore").addEventListener("click",()=>{
+  sortStates.score*=-1;
+  currentRows.sort((a,b)=>(a.score-b.score)*sortStates.score);
+  renderTable(currentRows);
+});
+
+// ---------- 可视化 ----------
+document.getElementById("chrForViz").addEventListener("change",()=>{
+  const chr=document.getElementById("chrForViz").value;
+  const canvas=document.getElementById("barCanvas");
+  const ctx=canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!chr){ctx.fillText("请选择染色体",30,30);return;}
+
+  const subset=allRows.filter(r=>r.seqid===chr);
+  const counts={};
+  subset.forEach(r=>counts[r.subfamily]=(counts[r.subfamily]||0)+1);
+  const entries=Object.entries(counts);
+  if(entries.length===0){ctx.fillText("该染色体无记录",30,30);return;}
+
+  const margin={left:70,right:20,top:40,bottom:100};
+  const plotWidth=canvas.width-margin.left-margin.right;
+  const plotHeight=canvas.height-margin.top-margin.bottom;
+  const maxCount=Math.max(...entries.map(e=>e[1]));
+  const barWidth=plotWidth/entries.length*0.7;
+  const xStep=plotWidth/entries.length;
+  const yScale=plotHeight/maxCount;
+
+  ctx.strokeStyle="#000";ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(margin.left,canvas.height-margin.bottom);
+  ctx.lineTo(canvas.width-margin.right,canvas.height-margin.bottom);
+  ctx.moveTo(margin.left,canvas.height-margin.bottom);
+  ctx.lineTo(margin.left,margin.top);
+  ctx.stroke();
+
+  ctx.fillStyle="#000";ctx.textAlign="right";ctx.textBaseline="middle";
+  const yTicks=5;
+  for(let i=0;i<=yTicks;i++){
+    const yVal=(maxCount/yTicks)*i;
+    const y=canvas.height-margin.bottom-yVal*yScale;
+    ctx.fillText(Math.round(yVal),margin.left-5,y);
+    ctx.strokeStyle="#eee";
+    ctx.beginPath();
+    ctx.moveTo(margin.left,y);
+    ctx.lineTo(canvas.width-margin.right,y);
+    ctx.stroke();
+  }
+
+  ctx.textAlign="center";ctx.textBaseline="top";
+  entries.forEach(([sub,c],i)=>{
+    const x=margin.left+i*xStep+(xStep-barWidth)/2;
+    const h=c*yScale;
+    const y=canvas.height-margin.bottom-h;
+    ctx.fillStyle="#4b9ce2";
+    ctx.fillRect(x,y,barWidth,h);
+    ctx.fillStyle="#000";
+    ctx.save();
+    ctx.translate(x+barWidth/2,canvas.height-margin.bottom+5);
+    ctx.rotate(-Math.PI/4);
+    ctx.fillText(sub,0,0);
+    ctx.restore();
+  });
+
+  ctx.fillStyle="#000";ctx.font="14px sans-serif";ctx.textAlign="center";
+  ctx.fillText(`${chr} 染色体上各 Subfamily 数量分布`,canvas.width/2,20);
+  ctx.save();ctx.translate(20,canvas.height/2);ctx.rotate(-Math.PI/2);
+  ctx.fillText("数量 (Count)",0,0);ctx.restore();
+  ctx.fillText("Subfamily",canvas.width/2,canvas.height-20);
+});
+</script>
+</body>
+</html>
